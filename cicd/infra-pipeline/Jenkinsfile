@@ -1,0 +1,191 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['Canada Central'], description: 'Deployment region')
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'uat', 'prod'], description: 'Deployment environment')
+        choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'Auto approve apply/destroy actions')
+    }
+
+    environment {
+        // Service Principal Credentials
+        ARM_CLIENT_ID       = credentials('aks_sp_client_id')
+        ARM_CLIENT_SECRET   = credentials('aks_sp_secret')
+        ARM_TENANT_ID       = credentials('aks_sp_tenant_id')
+        
+        // Explicit subscription IDs for each environment
+        SUB_ID_DEV          = credentials('subscription_id_dev')
+        SUB_ID_QA           = credentials('subscription_id_qa')
+        SUB_ID_UAT          = credentials('subscription_id_uat')
+        SUB_ID_PROD         = credentials('subscription_id_prod')
+        
+        PLAN_FILE           = "${params.ENVIRONMENT ?: 'dev'}.plan"
+    }
+
+    stages {
+        stage('Azure Login') {
+            steps {
+                script {
+                    def envName = (params.ENVIRONMENT ?: 'dev').toUpperCase()
+                    env.ARM_SUBSCRIPTION_ID = env."SUB_ID_${envName}"
+                    
+                    echo "=========================================================="
+                    echo "INIT: Logging into Azure for ${params.ENVIRONMENT} environment"
+                    echo "Subscription ID: ${env.ARM_SUBSCRIPTION_ID}"
+                    echo "=========================================================="
+                    
+                    sh """
+                        az login --service-principal \
+                            --username "${env.ARM_CLIENT_ID}" \
+                            --password "${env.ARM_CLIENT_SECRET}" \
+                            --tenant "${env.ARM_TENANT_ID}"
+
+                        echo "Listing available subscriptions:"
+                        az account list --output table
+
+                        az account set --subscription "${env.ARM_SUBSCRIPTION_ID}"
+                    """
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                echo "----------------------------------------------------------"
+                echo "TERRAFORM: Initializing for ${params.ENVIRONMENT}"
+                sh """
+                    cp infrastructure/backend/${params.ENVIRONMENT}-backend.tf infrastructure/
+                    terraform -chdir=infrastructure init \
+                        -reconfigure \
+                        -backend-config="key=${params.ENVIRONMENT}/${params.ENVIRONMENT}.tfstate"
+                """
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                echo "TERRAFORM: Validating configuration..."
+                sh "terraform -chdir=infrastructure validate"
+            }
+        }
+
+        stage('Terraform Plan') {
+            when {
+                expression { params.ACTION in ['plan', 'apply', 'destroy'] }
+            }
+            steps {
+                echo "TERRAFORM: Generating execution plan (${params.ACTION})"
+                sh """
+                    terraform -chdir=infrastructure plan \
+                        -var="subscription_id=${env.ARM_SUBSCRIPTION_ID}" \
+                        -var-file="tfvars/${params.ENVIRONMENT}.tfvars" \
+                        -out="../${env.PLAN_FILE}"
+                """
+            }
+        }
+
+        stage('Approval Required') {
+            when {
+                expression { (params.ACTION in ['apply', 'destroy']) && params.AUTO_APPROVE == false }
+            }
+            steps {
+                echo "WAIT: Manual approval required to proceed with ${params.ACTION}..."
+                timeout(time: 20, unit: 'MINUTES') {
+                    input(
+                        message: """Approval required for Terraform action.
+                        Region: ${params.REGION}
+                        Environment: ${params.ENVIRONMENT}
+                        Action: ${params.ACTION}
+                        Proceed?"""
+                    )
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                echo "TERRAFORM: Applying changes to ${params.ENVIRONMENT}..."
+                sh "terraform -chdir=infrastructure apply -auto-approve ../${env.PLAN_FILE}"
+                echo "TERRAFORM: Apply completed successfully."
+                echo "----------------------------------------------------------"
+            }
+        }
+
+        stage('Grant AGIC Permissions') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    echo "AZURE: Granting Network Contributor permissions to AGIC Identity..."
+                    sh """
+                        # 1. Get Cluster Name and Resource Group from Terraform
+                        CLUSTER_NAME=\$(terraform -chdir=infrastructure output -raw aks_cluster_name)
+                        RG_NAME=\$(terraform -chdir=infrastructure output -raw resource_group_name)
+                        SUBNET_ID=\$(terraform -chdir=infrastructure output -raw appgw_subnet_id)
+                        
+                        # 2. Get the Managed Resource Group (Node RG)
+                        NODE_RG=\$(az aks show --resource-group \$RG_NAME --name \$CLUSTER_NAME --query nodeResourceGroup -o tsv)
+                        
+                        # 3. Find ALL User-Assigned Identities in the Node RG
+                        IDENTITY_IDS=\$(az identity list --resource-group \$NODE_RG --query "[].principalId" -o tsv)
+                        
+                        if [ -z "\$IDENTITY_IDS" ]; then
+                           echo "Error: No identities found in Node RG \$NODE_RG"
+                           exit 1
+                        fi
+                        
+                        # Loop through every identity and grant Network Contributor on the Gateway Subnet
+                        for ID in \$IDENTITY_IDS; do
+                           echo "--------------------------------------------------------"
+                           echo "Granting Network Contributor on Subnet: \$SUBNET_ID"
+                           echo "To Identity ID: \$ID"
+                           
+                           # Retry logic for role assignment as Azure identities can be slow to propagate
+                           for i in {1..5}; do
+                               az role assignment create \
+                                   --role "Network Contributor" \
+                                   --assignee-object-id "\$ID" \
+                                   --assignee-principal-type "ServicePrincipal" \
+                                   --scope "\$SUBNET_ID" && break || sleep 15
+                           done
+                        done
+                    """
+                }
+            }
+        }
+
+        stage('Terraform Destroy') {
+            when {
+                expression { params.ACTION == 'destroy' }
+            }
+            steps {
+                echo "TERRAFORM: Destroying resources in ${params.ENVIRONMENT}..."
+                sh """
+                    terraform -chdir=infrastructure destroy -auto-approve \
+                        -var="subscription_id=${env.ARM_SUBSCRIPTION_ID}" \
+                        -var-file="tfvars/${params.ENVIRONMENT}.tfvars"
+                """
+                echo "TERRAFORM: Successfully destroyed ${params.ENVIRONMENT} resources."
+                echo "----------------------------------------------------------"
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline completed. Cleaning workspace.'
+            cleanWs()
+        }
+        success {
+            echo "Terraform completed successfully for ${params.REGION} - ${params.ENVIRONMENT} with action ${params.ACTION}"
+        }
+        failure {
+            echo "Terraform failed for ${params.REGION} - ${params.ENVIRONMENT} with action ${params.ACTION}"
+        }
+    }
+}

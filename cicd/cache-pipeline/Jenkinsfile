@@ -1,0 +1,294 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'uat', 'prod'], description: 'Target deployment environment')
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Override the container image tag for deployment/rollback. Leave empty to use latest commit.')
+    }
+
+    environment {
+        // Azure Authentication
+        ARM_CLIENT_ID       = credentials('aks_sp_client_id')
+        ARM_CLIENT_SECRET   = credentials('aks_sp_secret')
+        ARM_TENANT_ID       = credentials('aks_sp_tenant_id')
+        
+        // Subscription IDs
+        SUB_ID_DEV          = credentials('subscription_id_dev')
+        SUB_ID_QA           = credentials('subscription_id_qa')
+        SUB_ID_UAT          = credentials('subscription_id_uat')
+        SUB_ID_PROD         = credentials('subscription_id_prod')
+
+        // App Database Credentials
+        DB_USER             = credentials('db_user')
+        DB_PASS             = credentials('db_password')
+        
+        PROJECT_NAME        = "helmdeploymentapp"
+        
+        // Component Configuration
+        COMPONENT_DIR       = "cache"
+        COMPONENT_REPO      = "snaplink-cache"
+        HELM_COMPONENT      = "redis"
+        
+        // Tag Logic
+        COMMIT_ID           = "${env.GIT_COMMIT ? env.GIT_COMMIT.take(8) : 'latest'}"
+        RESOLVED_TAG        = "${params.IMAGE_TAG ?: env.COMPONENT_DIR + '-' + env.COMMIT_ID}"
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    def envName = params.ENVIRONMENT.toUpperCase()
+                    def subId = env."SUB_ID_${envName}"
+                    echo "=========================================================="
+                    echo "INIT: Logging into Azure for ${params.ENVIRONMENT} environment"
+                    echo "Subscription ID: ${subId}"
+                    echo "=========================================================="
+                    sh """
+                        az login --service-principal -u '${env.ARM_CLIENT_ID}' -p '${env.ARM_CLIENT_SECRET}' -t '${env.ARM_TENANT_ID}'
+                        az account set --subscription '${subId}'
+                    """
+                }
+            }
+        }
+
+        stage('Build in DEV') {
+            when { expression { params.ENVIRONMENT == 'dev' && params.IMAGE_TAG == '' } }
+            steps {
+                script {
+                    def acrName = "${env.PROJECT_NAME}devacr"
+                    echo "----------------------------------------------------------"
+                    echo "BUILD: Authenticating with ACR: ${acrName}"
+                    sh "az acr login --name ${acrName}"
+                    
+                    echo "BUILD: Building ${env.COMPONENT_REPO}:${env.RESOLVED_TAG}"
+                    sh "docker build -t ${acrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} src/${env.COMPONENT_DIR}"
+                    echo "----------------------------------------------------------"
+                }
+            }
+        }
+
+        stage('Push to DEV ACR') {
+            when { expression { params.ENVIRONMENT == 'dev' && params.IMAGE_TAG == '' } }
+            steps {
+                script {
+                    def acrName = "${env.PROJECT_NAME}devacr"
+                    echo "----------------------------------------------------------"
+                    echo "PUSH: Pushing ${env.COMPONENT_REPO}:${env.RESOLVED_TAG}"
+                    sh "docker push ${acrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}"
+                    echo "----------------------------------------------------------"
+                }
+            }
+        }
+
+        stage('Deploy to AKS in DEV') {
+            when { expression { params.ENVIRONMENT == 'dev' } }
+            steps {
+                script {
+                    def targetAcrName = "${env.PROJECT_NAME}devacr"
+                    def clusterName = "helm-deployment-app-dev-aks"
+                    def resourceGroup = "helm-deployment-app-dev-rg"
+
+                    echo "----------------------------------------------------------"
+                    echo "DEPLOY: Targeting DEV AKS Cluster"
+                    echo "Cluster Name: ${clusterName}"
+                    echo "Using Registry: ${targetAcrName}.azurecr.io"
+                    echo "Deploying Image Tag: ${env.RESOLVED_TAG}"
+                    
+                    sh """
+                        az aks get-credentials --resource-group ${resourceGroup} --name ${clusterName} --overwrite-existing
+                        if helm status snaplink --namespace default > /dev/null 2>&1; then
+                            HELM_UPGRADE_OPT="--reuse-values"
+                        else
+                            HELM_UPGRADE_OPT=""
+                        fi
+
+                        helm upgrade --install snaplink kube/snaplink \
+                            --namespace default \
+                            \$HELM_UPGRADE_OPT \
+                            --set global.imageRegistry=${targetAcrName}.azurecr.io \
+                            --set ${env.HELM_COMPONENT}.imageTag=${env.RESOLVED_TAG} \
+                            --set db.user=${env.DB_USER} \
+                            --set db.password=${env.DB_PASS}
+                    """
+                }
+            }
+        }
+
+        stage('Pull and Push image to QA') {
+            when { expression { params.ENVIRONMENT == 'qa' && params.IMAGE_TAG == '' } }
+            steps {
+                script {
+                    def sourceAcrName = "${env.PROJECT_NAME}devacr"
+                    def targetAcrName = "${env.PROJECT_NAME}qaacr"
+
+                    echo "----------------------------------------------------------"
+                    echo "PROMOTE: Promoting image to QA ACR"
+                    sh "az acr login --name ${sourceAcrName}"
+                    sh "az acr login --name ${targetAcrName}"
+                    
+                    sh """
+                        docker pull ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker tag ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker push ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to AKS in QA') {
+            when { expression { params.ENVIRONMENT == 'qa' } }
+            steps {
+                script {
+                    def targetAcrName = "${env.PROJECT_NAME}qaacr"
+                    def clusterName = "helm-deployment-app-qa-aks"
+                    def resourceGroup = "helm-deployment-app-qa-rg"
+
+                    echo "----------------------------------------------------------"
+                    echo "DEPLOY: Targeting QA AKS Cluster"
+                    sh """
+                        az aks get-credentials --resource-group ${resourceGroup} --name ${clusterName} --overwrite-existing
+                        if helm status snaplink --namespace default > /dev/null 2>&1; then
+                            HELM_UPGRADE_OPT="--reuse-values"
+                        else
+                            HELM_UPGRADE_OPT=""
+                        fi
+
+                        helm upgrade --install snaplink kube/snaplink \
+                            --namespace default \
+                            \$HELM_UPGRADE_OPT \
+                            --set global.imageRegistry=${targetAcrName}.azurecr.io \
+                            --set ${env.HELM_COMPONENT}.imageTag=${env.RESOLVED_TAG} \
+                            --set db.user=${env.DB_USER} \
+                            --set db.password=${env.DB_PASS}
+                    """
+                }
+            }
+        }
+
+        stage('Pull and Push image to UAT') {
+            when { expression { params.ENVIRONMENT == 'uat' && params.IMAGE_TAG == '' } }
+            steps {
+                script {
+                    def sourceAcrName = "${env.PROJECT_NAME}qaacr"
+                    def targetAcrName = "${env.PROJECT_NAME}uatacr"
+
+                    echo "----------------------------------------------------------"
+                    echo "PROMOTE: Promoting image to UAT ACR"
+                    sh "az acr login --name ${sourceAcrName}"
+                    sh "az acr login --name ${targetAcrName}"
+                    
+                    sh """
+                        docker pull ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker tag ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker push ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to AKS in UAT') {
+            when { expression { params.ENVIRONMENT == 'uat' } }
+            steps {
+                script {
+                    def targetAcrName = "${env.PROJECT_NAME}uatacr"
+                    def clusterName = "helm-deployment-app-uat-aks"
+                    def resourceGroup = "helm-deployment-app-uat-rg"
+
+                    echo "----------------------------------------------------------"
+                    echo "DEPLOY: Targeting UAT AKS Cluster"
+                    sh """
+                        az aks get-credentials --resource-group ${resourceGroup} --name ${clusterName} --overwrite-existing
+                        if helm status snaplink --namespace default > /dev/null 2>&1; then
+                            HELM_UPGRADE_OPT="--reuse-values"
+                        else
+                            HELM_UPGRADE_OPT=""
+                        fi
+
+                        helm upgrade --install snaplink kube/snaplink \
+                            --namespace default \
+                            \$HELM_UPGRADE_OPT \
+                            --set global.imageRegistry=${targetAcrName}.azurecr.io \
+                            --set ${env.HELM_COMPONENT}.imageTag=${env.RESOLVED_TAG} \
+                            --set db.user=${env.DB_USER} \
+                            --set db.password=${env.DB_PASS}
+                    """
+                }
+            }
+        }
+
+        stage('Approve Prod Deployment') {
+            when { expression { params.ENVIRONMENT == 'prod' } }
+            steps {
+                input message: "Push image and deploy application to PROD?", ok: "Deploy"
+            }
+        }
+
+        stage('Pull and Push image to PROD') {
+            when { expression { params.ENVIRONMENT == 'prod' && params.IMAGE_TAG == '' } }
+            steps {
+                script {
+                    def sourceAcrName = "${env.PROJECT_NAME}uatacr"
+                    def targetAcrName = "${env.PROJECT_NAME}prodacr"
+
+                    echo "----------------------------------------------------------"
+                    echo "PROMOTE: Promoting image to PROD ACR"
+                    sh "az acr login --name ${sourceAcrName}"
+                    sh "az acr login --name ${targetAcrName}"
+                    
+                    sh """
+                        docker pull ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker tag ${sourceAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                        docker push ${targetAcrName}.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to AKS in PROD') {
+            when { expression { params.ENVIRONMENT == 'prod' } }
+            steps {
+                script {
+                    def targetAcrName = "${env.PROJECT_NAME}prodacr"
+                    def clusterName = "helm-deployment-app-prod-aks"
+                    def resourceGroup = "helm-deployment-app-prod-rg"
+
+                    echo "----------------------------------------------------------"
+                    echo "DEPLOY: Targeting PROD AKS Cluster"
+                    sh """
+                        az aks get-credentials --resource-group ${resourceGroup} --name ${clusterName} --overwrite-existing
+                        if helm status snaplink --namespace default > /dev/null 2>&1; then
+                            HELM_UPGRADE_OPT="--reuse-values"
+                        else
+                            HELM_UPGRADE_OPT=""
+                        fi
+
+                        helm upgrade --install snaplink kube/snaplink \
+                            --namespace default \
+                            \$HELM_UPGRADE_OPT \
+                            --set global.imageRegistry=${targetAcrName}.azurecr.io \
+                            --set ${env.HELM_COMPONENT}.imageTag=${env.RESOLVED_TAG} \
+                            --set db.user=${env.DB_USER} \
+                            --set db.password=${env.DB_PASS}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo 'Pipeline execution complete. Cleaning up...'
+                sh "az logout || true"
+                cleanWs()
+            }
+        }
+        success { 
+            echo " ${params.ENVIRONMENT} Deployment successful! Image: ${env.RESOLVED_TAG}" 
+        }
+        failure { 
+            echo " ${params.ENVIRONMENT} Pipeline failed. Please check the logs." 
+        }
+    }
+}
