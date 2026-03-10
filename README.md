@@ -39,7 +39,7 @@ Each environment consists of the following dedicated Azure resources, ensuring l
 The application components are deployed to AKS using **Helm**, the package manager for Kubernetes. This approach ensures standardized, repeatable, and easily configurable deployments across all four environments.
 
 ### Umbrella Helm Chart
-All microservices (frontend, api, db, redis) are packaged together under a single **Umbrella Helm Chart** located in the `kube/snaplink` directory.
+All microservices (frontend, api, db, redis) are packaged together under a single **Helm Chart** located in the `kube/snaplink` directory.
 
 ### Environment Configuration (`values.yaml`)
 The deployment is highly parameterized. Environment-specific configurations, such as:
@@ -81,4 +81,5 @@ Each microservice has its own dedicated pipeline for independent lifecycle manag
 * **Subscription Isolation:** To enforce strict logical isolation, prevent accidental cross-environment deployments, and simplify cost management, **each environment (dev, qa, uat, prod) utilizes a dedicated and distinct Azure Subscription ID.**
 * **Secret Management:** Database passwords and other sensitive configuration secrets are injected into the Helm deployments securely via the CI/CD pipeline, ensuring that no hardcoded secrets reside in the source code repository.
 <img width="940" height="513" alt="image" src="https://github.com/user-attachments/assets/88bf3770-3e9a-43aa-a947-4a6c0a8a860d" />
+
 
