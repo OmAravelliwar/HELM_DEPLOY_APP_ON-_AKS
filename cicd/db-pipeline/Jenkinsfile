@@ -209,11 +209,7 @@ def deployToAKS(envName) {
 def cleanup() {
     echo 'Pipeline execution complete. Cleaning up...'
     
-<<<<<<< Updated upstream
     // Remove local Docker images to save space on Jenkins agent
-=======
-    // Remove local Docker images
->>>>>>> Stashed changes
     sh "docker rmi ${env.PROJECT_NAME}devacr.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} || true"
     sh "docker rmi ${env.PROJECT_NAME}qaacr.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} || true"
     sh "docker rmi ${env.PROJECT_NAME}uatacr.azurecr.io/${env.COMPONENT_REPO}:${env.RESOLVED_TAG} || true"
