@@ -19,6 +19,7 @@ pipeline {
         SUB_ID_PROD         = credentials('subscription_id_prod')
         
         PROJECT_NAME        = "helmdeploymentapp"
+        PRODUCT_NAME        = "snaplink"
         
         // Component Configuration
         COMPONENT_DIR       = "cache"
@@ -200,7 +201,7 @@ def deployToAKS(envName) {
            -e "s|<image_tag>|${RESOLVED_TAG}|g" ${HELM_VALUES_FILE}
 
         helm upgrade --install ${env.HELM_COMPONENT} helm_charts \\
-            --namespace snaplink-ns --create-namespace \\
+            --namespace ${PRODUCT_NAME}-${params.ENVIRONMENT} --create-namespace \\
             \$HELM_UPGRADE_OPT \\
             -f ${HELM_VALUES_FILE}
     """

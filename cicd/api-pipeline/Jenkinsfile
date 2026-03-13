@@ -23,6 +23,7 @@ pipeline {
         DB_PASS             = credentials('db_password')
         
         PROJECT_NAME        = "helmdeploymentapp"
+        PRODUCT_NAME        = "snaplink"
         
         // Component Configuration
         COMPONENT_DIR       = "api"
@@ -208,7 +209,7 @@ def deployToAKS(envName) {
            -e "s|<DB_HOST>|db|g" ${HELM_VALUES_FILE}
 
         helm upgrade --install ${env.HELM_COMPONENT} helm_charts \\
-            --namespace snaplink-ns --create-namespace \\
+            --namespace ${PRODUCT_NAME}-${params.ENVIRONMENT} --create-namespace \\
             \$HELM_UPGRADE_OPT \\
             -f ${HELM_VALUES_FILE}
     """
