@@ -1,5 +1,4 @@
 nameOverride: "frontend"
-namespace: "snaplink-ns"
 replicaCount: 1
 global:
   imageRegistry: <registry>

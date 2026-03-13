@@ -1,5 +1,4 @@
 nameOverride: "redis"
-namespace: "snaplink-ns"
 
 global:
   imageRegistry: <registry>

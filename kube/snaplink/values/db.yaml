@@ -1,5 +1,4 @@
 nameOverride: "db"
-namespace: "snaplink-ns"
 
 global:
   imageRegistry: <registry>
