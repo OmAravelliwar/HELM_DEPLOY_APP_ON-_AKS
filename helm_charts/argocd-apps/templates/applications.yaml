@@ -1,0 +1,28 @@
+{{- range .Values.applications }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ $.Values.namespacePrefix }}-{{ .name }}-{{ $.Values.environment }}
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: {{ $.Values.repoURL | quote }}
+    targetRevision: {{ $.Values.targetRevision | quote }}
+    path: "helm_charts"
+    helm:
+      valueFiles:
+        - {{ printf "../kube/values/%s/%s-%s.yaml" $.Values.environment .component $.Values.environment | quote }}
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: {{ printf "%s-%s" $.Values.namespacePrefix $.Values.environment | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+{{- end }}

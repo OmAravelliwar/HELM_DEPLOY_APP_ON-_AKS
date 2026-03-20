@@ -1,0 +1,14 @@
+repoURL: "https://github.com/bobhatevishal/Helm-deployment-app.git"
+targetRevision: main
+environment: dev
+namespacePrefix: snaplink
+
+applications:
+  - name: api
+    component: api
+  - name: cache
+    component: cache
+  - name: db
+    component: db
+  - name: frontend
+    component: frontend

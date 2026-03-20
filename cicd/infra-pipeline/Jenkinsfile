@@ -180,7 +180,7 @@ pipeline {
                         # 3. Create Namespace (if not exists)
                         kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
 
-                        # 4. Install/Upgrade ArgoCD
+                        # 4. Install/Upgrade ArgoCD (Core)
                         helm upgrade --install argocd argocd/argo-cd \
                             --namespace argocd \
                             --version 7.4.4 \
@@ -188,9 +188,12 @@ pipeline {
                             --wait \
                             --timeout 15m
 
-                        # 5. Apply App-of-Apps
-                        echo "Applying App-of-Apps..."
-                        kubectl apply -f argocd/app-of-apps.yaml
+                        # 5. Deploy ArgoCD Bootstrap Applications
+                        echo "Deploying ArgoCD Bootstrap Applications via Helm..."
+                        helm upgrade --install argocd-apps helm_charts/argocd-apps \
+                            --namespace argocd \
+                            --set environment=${params.ENVIRONMENT} \
+                            --wait
                     """
                 }
             }
