@@ -1,6 +1,10 @@
 repoURL: "https://github.com/bobhatevishal/Helm-deployment-app.git"
 targetRevision: main
-environment: dev
+environments:
+  - dev
+  - qa
+  - uat
+  - prod
 namespacePrefix: snaplink
 
 applications:

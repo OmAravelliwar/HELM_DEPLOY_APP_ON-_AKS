@@ -192,7 +192,6 @@ pipeline {
                         echo "Deploying ArgoCD Bootstrap Applications via Helm..."
                         helm upgrade --install argocd-apps helm_charts/argocd-apps \
                             --namespace argocd \
-                            --set environment=${params.ENVIRONMENT} \
                             --wait
                     """
                 }

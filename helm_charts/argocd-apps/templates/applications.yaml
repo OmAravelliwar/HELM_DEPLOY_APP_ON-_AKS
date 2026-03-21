@@ -1,9 +1,10 @@
-{{- range .Values.applications }}
+{{- range $env := .Values.environments }}
+{{- range $app := $.Values.applications }}
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: {{ $.Values.namespacePrefix }}-{{ .name }}-{{ $.Values.environment }}
+  name: {{ $.Values.namespacePrefix }}-{{ $app.name }}-{{ $env }}
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -15,14 +16,15 @@ spec:
     path: "helm_charts"
     helm:
       valueFiles:
-        - {{ printf "../kube/values/%s/%s-%s.yaml" $.Values.environment .component $.Values.environment | quote }}
+        - {{ printf "../kube/values/%s/%s-%s.yaml" $env $app.component $env | quote }}
   destination:
     server: "https://kubernetes.default.svc"
-    namespace: {{ printf "%s-%s" $.Values.namespacePrefix $.Values.environment | quote }}
+    namespace: {{ printf "%s-%s" $.Values.namespacePrefix $env | quote }}
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+{{- end }}
 {{- end }}
